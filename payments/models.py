@@ -51,7 +51,6 @@ class Customer(models.Model):
     bank = models.CharField(max_length=100, blank=True, choices=BANK_CHOICES)
     default_funding_mode = models.CharField(max_length=20, choices=FUNDING_MODE_CHOICES, default='kona_credit')
 
-    # Credit card fields
     credit_limit = models.DecimalField(max_digits=10, decimal_places=2, default=2000.00)
     current_balance = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     statement_balance = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
@@ -79,6 +78,12 @@ class Customer(models.Model):
             return None
         return (self.payment_due_date - timezone.now().date()).days
 
+    @property
+    def is_overdue(self):
+        if not self.payment_due_date:
+            return False
+        return timezone.now().date() > self.payment_due_date and self.statement_balance > 0
+
     def __str__(self):
         return f"{self.full_name or self.phone}"
 
@@ -86,7 +91,7 @@ class Customer(models.Model):
         ordering = ['-created_at']
 
 
-class CreditCard(models.Model):
+class CardDetails(models.Model):
     STATUS_CHOICES = [
         ('active', 'Active'),
         ('frozen', 'Frozen'),
@@ -95,7 +100,7 @@ class CreditCard(models.Model):
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    customer = models.OneToOneField(Customer, on_delete=models.CASCADE, related_name='card')
+    customer = models.OneToOneField(Customer, on_delete=models.CASCADE, related_name='card_details')
     card_number = models.CharField(max_length=16, default=generate_card_number)
     cvv = models.CharField(max_length=3, default=generate_cvv)
     expiry_date = models.DateField(default=default_expiry)
@@ -109,43 +114,19 @@ class CreditCard(models.Model):
         return f"**** **** **** {self.card_number[-4:]}"
 
     @property
-    def expiry_formatted(self):
+    def expiry_display(self):
         return self.expiry_date.strftime('%m/%y')
+
+    @property
+    def expiry_month(self):
+        return self.expiry_date.month
+
+    @property
+    def expiry_year(self):
+        return self.expiry_date.year
 
     def __str__(self):
         return f"{self.customer} — {self.masked_number}"
-
-
-class CreditTransaction(models.Model):
-    TYPE_CHOICES = [
-        ('purchase', 'Purchase'),
-        ('repayment', 'Repayment'),
-        ('interest', 'Interest Charge'),
-        ('fee', 'Fee'),
-        ('refund', 'Refund'),
-    ]
-    FUNDING_CHOICES = [
-        ('kona_credit', 'Kona Credit'),
-        ('bank_eps', 'Bank Transfer (EPS)'),
-        ('bank_debit_order', 'Bank Debit Order'),
-    ]
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='credit_transactions')
-    merchant = models.ForeignKey(Merchant, on_delete=models.SET_NULL, null=True, blank=True, related_name='transactions')
-    transaction_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
-    funding_source = models.CharField(max_length=30, choices=FUNDING_CHOICES, blank=True)
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
-    balance_effect = models.DecimalField(max_digits=10, decimal_places=2)
-    description = models.CharField(max_length=300, blank=True)
-    reference = models.CharField(max_length=100, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    def __str__(self):
-        return f"{self.customer} — {self.transaction_type} — E{self.amount}"
-
-    class Meta:
-        ordering = ['-created_at']
 
 
 class CreditStatement(models.Model):
@@ -171,11 +152,48 @@ class CreditStatement(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='open')
     created_at = models.DateTimeField(auto_now_add=True)
 
+    @property
+    def days_until_due(self):
+        return (self.due_date - timezone.now().date()).days
+
     def __str__(self):
         return f"{self.customer} — {self.period_start} to {self.period_end} — {self.status}"
 
     class Meta:
         ordering = ['-period_end']
+
+
+class CreditTransaction(models.Model):
+    TYPE_CHOICES = [
+        ('purchase', 'Purchase'),
+        ('repayment', 'Repayment'),
+        ('interest', 'Interest Charge'),
+        ('fee', 'Fee'),
+        ('refund', 'Refund'),
+    ]
+    FUNDING_CHOICES = [
+        ('credit', 'Kona Credit'),
+        ('bank', 'Bank Transfer (EPS)'),
+        ('jit', 'JIT Bank to Card'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='credit_transactions')
+    merchant = models.ForeignKey(Merchant, on_delete=models.SET_NULL, null=True, blank=True, related_name='transactions')
+    statement = models.ForeignKey(CreditStatement, on_delete=models.SET_NULL, null=True, blank=True, related_name='transactions')
+    session = models.ForeignKey('PaymentSession', on_delete=models.SET_NULL, null=True, blank=True, related_name='credit_transactions')
+    transaction_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
+    funding_mode = models.CharField(max_length=30, choices=FUNDING_CHOICES, blank=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    description = models.CharField(max_length=300, blank=True)
+    reference = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.customer} — {self.transaction_type} — E{self.amount}"
+
+    class Meta:
+        ordering = ['-created_at']
 
 
 class PaymentSession(models.Model):
@@ -187,9 +205,9 @@ class PaymentSession(models.Model):
         ('expired', 'Expired'),
     ]
     FUNDING_CHOICES = [
-        ('kona_credit', 'Kona Credit Card'),
-        ('bank_eps', 'Bank Transfer (EPS)'),
-        ('bank_debit_order', 'Bank Debit Order'),
+        ('credit', 'Kona Credit Card'),
+        ('bank', 'Bank Transfer (EPS)'),
+        ('jit', 'JIT Bank to Card'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -197,8 +215,10 @@ class PaymentSession(models.Model):
     customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name='sessions')
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
-    funding_source = models.CharField(max_length=30, choices=FUNDING_CHOICES, blank=True)
+    funding_mode = models.CharField(max_length=30, choices=FUNDING_CHOICES, blank=True)
     bank_used = models.CharField(max_length=100, blank=True)
+    jit_funded = models.BooleanField(default=False)
+    jit_bank = models.CharField(max_length=100, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     confirmed_at = models.DateTimeField(null=True, blank=True)
 
@@ -207,6 +227,33 @@ class PaymentSession(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+
+
+class DebitMandate(models.Model):
+    BANK_CHOICES = [
+        ('fnb', 'FNB Eswatini'),
+        ('standard', 'Standard Bank'),
+        ('nedbank', 'Nedbank'),
+        ('eswatini_bank', 'Eswatini Bank'),
+    ]
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('cancelled', 'Cancelled'),
+        ('suspended', 'Suspended'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='mandates')
+    bank = models.CharField(max_length=100, choices=BANK_CHOICES)
+    account_number = models.CharField(max_length=50, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
+    authorised_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.customer} — {self.bank} — {self.status}"
+
+    class Meta:
+        ordering = ['-authorised_at']
 
 
 class Repayment(models.Model):
@@ -236,3 +283,34 @@ class Repayment(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+
+
+class CreditCard(models.Model):
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('frozen', 'Frozen'),
+        ('cancelled', 'Cancelled'),
+        ('pending', 'Pending Activation'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    customer = models.OneToOneField(Customer, on_delete=models.CASCADE, related_name='credit_cards')
+    card_number = models.CharField(max_length=16, default=generate_card_number)
+    cvv = models.CharField(max_length=3, default=generate_cvv)
+    expiry_date = models.DateField(default=default_expiry)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
+    bin_country = models.CharField(max_length=50, default='ZA')
+    card_network = models.CharField(max_length=20, default='Visa')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    @property
+    def masked_number(self):
+        return f"**** **** **** {self.card_number[-4:]}"
+
+    @property
+    def expiry_formatted(self):
+        return self.expiry_date.strftime('%m/%y')
+
+    def __str__(self):
+        return f"{self.customer} — {self.masked_number}"
+

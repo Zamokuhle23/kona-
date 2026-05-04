@@ -32,15 +32,15 @@ class CreditStatementAdmin(admin.ModelAdmin):
 
 @admin.register(CreditTransaction)
 class CreditTransactionAdmin(admin.ModelAdmin):
-    list_display = ['customer', 'transaction_type', 'funding_source', 'amount', 'merchant', 'created_at']
-    list_filter = ['transaction_type', 'funding_source']
+    list_display = ['customer', 'transaction_type', 'funding_mode', 'amount', 'merchant', 'created_at']
+    list_filter = ['transaction_type', 'funding_mode']
     search_fields = ['customer__phone', 'merchant__name']
 
 
 @admin.register(PaymentSession)
 class PaymentSessionAdmin(admin.ModelAdmin):
-    list_display = ['merchant', 'amount', 'status', 'funding_source', 'bank_used', 'created_at']
-    list_filter = ['status', 'funding_source']
+    list_display = ['merchant', 'amount', 'status', 'funding_mode', 'bank_used', 'created_at']
+    list_filter = ['status', 'funding_mode']
     readonly_fields = ['id', 'created_at', 'confirmed_at']
 
 
